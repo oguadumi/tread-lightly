@@ -205,7 +205,7 @@
   const $ = (id) => document.getElementById(id);
   const meter = $("meter"), pickBtn = $("pick"), stopBtn = $("stop");
 
-  let device = null, abort = null;
+  let device = null, abort = null, scan = null;
   let raw = [];          // recent raw readings for smoothing
   let history = [];      // {t, v} smoothed values
   let lastPacket = 0, packets = 0, wasHot = false;
@@ -240,39 +240,97 @@
   }
 
   // ---- device selection + tracking ----
-  async function pick() {
-    showError("");
+  // Browsers (and iOS wrappers like Bluefy) sometimes throw plain numbers or objects, so format defensively.
+  function errText(e) {
+    if (e == null) return "unknown error";
+    if (typeof e !== "object") return "code " + e;
+    const parts = [e.name, e.message, e.code != null ? "code " + e.code : ""].filter(Boolean);
+    return parts.length ? parts.join(" - ") : JSON.stringify(e);
+  }
+  function isCancel(e) { return e && e.name === "NotFoundError"; }
+
+  async function requestAnyDevice() {
     try {
-      const d = await navigator.bluetooth.requestDevice({
+      return await navigator.bluetooth.requestDevice({
         acceptAllDevices: true,
         optionalServices: [0x1826], // Fitness Machine Service (treadmills / walking pads)
       });
-      await stop();
-      device = d;
-      $("deviceName").textContent = d.name || "Unnamed device (" + d.id.slice(0, 8) + "…)";
-      if (typeof d.watchAdvertisements !== "function") {
-        $("noWatch").hidden = false;
-        $("label").textContent = "Selected";
-        $("meta").textContent = "Live tracking needs the Chrome flag (see the yellow box above).";
-        return;
-      }
-      raw = []; history = []; packets = 0; wasHot = false;
-      lastPacket = Date.now();
-      d.addEventListener("advertisementreceived", onAdvert);
-      abort = new AbortController();
-      await d.watchAdvertisements({ signal: abort.signal });
-      meter.classList.remove("idle");
-      $("label").textContent = "Listening…";
-      $("meta").textContent = "Waiting for the first broadcast…";
-      stopBtn.disabled = false;
     } catch (e) {
-      if (e && e.name === "NotFoundError") return; // user cancelled the picker
-      showError("Couldn't start: " + (e && e.message ? e.message : e));
+      if (isCancel(e)) throw e;
+      // Some implementations reject optionalServices; retry with the bare picker.
+      return await navigator.bluetooth.requestDevice({ acceptAllDevices: true });
     }
+  }
+
+  async function pick() {
+    showError("");
+    let d;
+    try {
+      d = await requestAnyDevice();
+    } catch (e) {
+      if (isCancel(e)) return; // user cancelled the picker
+      showError("Couldn't open the device picker (" + errText(e) + "). Check this browser has Bluetooth permission in your phone's Settings, and that Bluetooth is on.");
+      return;
+    }
+
+    await stop();
+    device = d;
+    $("deviceName").textContent = d.name || "Unnamed device (" + String(d.id).slice(0, 8) + "…)";
+    raw = []; history = []; packets = 0; wasHot = false;
+    lastPacket = Date.now();
+
+    let watchErr = null;
+    if (typeof d.watchAdvertisements === "function") {
+      try {
+        d.addEventListener("advertisementreceived", onAdvert);
+        abort = new AbortController();
+        await d.watchAdvertisements({ signal: abort.signal });
+        return startedListening("watchAdvertisements");
+      } catch (e) {
+        watchErr = e;
+        d.removeEventListener("advertisementreceived", onAdvert);
+        abort = null;
+      }
+    }
+
+    // Fallback: a general scan, keeping only packets from the chosen device.
+    if (typeof navigator.bluetooth.requestLEScan === "function") {
+      try {
+        navigator.bluetooth.addEventListener("advertisementreceived", onScanAdvert);
+        scan = await navigator.bluetooth.requestLEScan({ acceptAllAdvertisements: true, keepRepeatedDevices: true });
+        return startedListening("requestLEScan");
+      } catch (e) {
+        navigator.bluetooth.removeEventListener("advertisementreceived", onScanAdvert);
+        scan = null;
+        watchErr = watchErr || e;
+      }
+    }
+
+    $("label").textContent = "Selected";
+    if (watchErr) {
+      showError("Picked the device, but live signal tracking failed (" + errText(watchErr) + "). This browser probably doesn't support it. On iPhone use nRF Connect or LightBlue; on Android use Chrome with the flag below.");
+    } else {
+      $("noWatch").hidden = false;
+      $("meta").textContent = "Live tracking isn't supported in this browser. On Android Chrome, turn on the flag in the yellow box.";
+    }
+  }
+
+  function startedListening(method) {
+    meter.classList.remove("idle");
+    $("label").textContent = "Listening…";
+    $("meta").textContent = "Waiting for the first broadcast… (" + method + ")";
+    stopBtn.disabled = false;
+  }
+
+  function onScanAdvert(ev) {
+    if (!device || !ev.device) return;
+    if (ev.device.id === device.id || (device.name && ev.device.name === device.name)) onAdvert(ev);
   }
 
   async function stop() {
     if (abort) { abort.abort(); abort = null; }
+    if (scan) { try { scan.stop(); } catch (_) {} scan = null; }
+    if (navigator.bluetooth) navigator.bluetooth.removeEventListener("advertisementreceived", onScanAdvert);
     if (device) device.removeEventListener("advertisementreceived", onAdvert);
     stopBtn.disabled = true;
     meter.classList.add("idle");
@@ -356,7 +414,7 @@
   }
 
   setInterval(() => {
-    if (abort && Date.now() - lastPacket > STALE_MS) $("stale").hidden = false;
+    if ((abort || scan) && Date.now() - lastPacket > STALE_MS) $("stale").hidden = false;
   }, 1000);
 
   pickBtn.addEventListener("click", pick);
