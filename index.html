@@ -1,0 +1,368 @@
+<!doctype html>
+<!--
+  Bluetooth Finder: a hot/cold signal meter for finding a Bluetooth device (e.g. a walking pad).
+
+  HOW TO USE
+  1. Host this file on any HTTPS static host (Web Bluetooth does NOT work from file://):
+       - Netlify Drop:  open https://app.netlify.com/drop and upload this file / its folder
+       - GitHub Pages:  new repo -> upload index.html -> Settings -> Pages -> deploy from main
+  2. Open the HTTPS link in Chrome on Android.
+  3. In Chrome, go to chrome://flags, enable "Experimental Web Platform features", relaunch.
+  4. Turn on Bluetooth + Location, close the walking pad's own app, then tap "Pick device".
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Bluetooth Finder</title>
+<style>
+  :root {
+    --bg: #f6f7f9;
+    --card: #ffffff;
+    --text: #15181d;
+    --muted: #5b6472;
+    --border: #dfe3e8;
+    --accent: #2563eb;
+    --warn-bg: #fff4d6;
+    --warn-text: #6b4a00;
+    --err-bg: #fde4e4;
+    --err-text: #8a1c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1216;
+      --card: #181c22;
+      --text: #e8ebef;
+      --muted: #9aa3af;
+      --border: #2a3039;
+      --accent: #60a5fa;
+      --warn-bg: #3a2f10;
+      --warn-text: #f5d98a;
+      --err-bg: #3d1818;
+      --err-text: #f3b0b0;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1216;
+    --card: #181c22;
+    --text: #e8ebef;
+    --muted: #9aa3af;
+    --border: #2a3039;
+    --accent: #60a5fa;
+    --warn-bg: #3a2f10;
+    --warn-text: #f5d98a;
+    --err-bg: #3d1818;
+    --err-text: #f3b0b0;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    padding: 16px;
+    padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  }
+  main { max-width: 560px; margin: 0 auto; display: grid; gap: 16px; }
+  h1 { font-size: 1.5rem; margin: 4px 0 0; }
+  h2 { font-size: 1.05rem; margin: 0 0 8px; }
+  p { margin: 0 0 8px; }
+  .sub { color: var(--muted); margin: 0; }
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+  }
+  ol, ul { margin: 0; padding-left: 20px; }
+  li { margin: 4px 0; }
+  code {
+    font-family: ui-monospace, Menlo, Consolas, monospace;
+    font-size: 0.9em;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 1px 5px;
+    word-break: break-all;
+  }
+  .notice { border-radius: 12px; padding: 12px 14px; }
+  .notice.warn { background: var(--warn-bg); color: var(--warn-text); }
+  .notice.err { background: var(--err-bg); color: var(--err-text); }
+  .notice p:last-child { margin-bottom: 0; }
+  [hidden] { display: none !important; }
+
+  .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+  button {
+    font: inherit;
+    font-weight: 600;
+    border: 0;
+    border-radius: 12px;
+    padding: 14px 18px;
+    cursor: pointer;
+    flex: 1 1 auto;
+    min-height: 52px;
+  }
+  button.primary { background: var(--accent); color: #fff; }
+  button.secondary { background: transparent; color: var(--text); border: 1px solid var(--border); }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  /* Meter: colour is driven by --heat (0 = far/blue, 1 = close/red) */
+  #meter {
+    --heat: 0;
+    border-radius: 18px;
+    padding: 20px 16px;
+    text-align: center;
+    color: #fff;
+    background: hsl(calc(220 - 220 * var(--heat)) 80% calc(42% + 6% * var(--heat)));
+    transition: background 0.4s ease;
+    display: grid;
+    gap: 6px;
+  }
+  #meter.idle { background: #4b5563; }
+  #deviceName { font-weight: 600; opacity: 0.9; overflow-wrap: anywhere; }
+  #label { font-size: 2.2rem; font-weight: 800; letter-spacing: 0.02em; line-height: 1.1; }
+  #rssi { font-size: 4rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+  #rssi small { font-size: 1.2rem; font-weight: 600; opacity: 0.85; }
+  #trend { font-size: 1.15rem; font-weight: 600; min-height: 1.6em; }
+  #bar { height: 12px; border-radius: 6px; background: rgba(255,255,255,0.25); overflow: hidden; }
+  #barFill { height: 100%; width: 0%; background: #fff; border-radius: 6px; transition: width 0.3s ease; }
+  #spark { width: 100%; height: 70px; display: block; }
+  #stale { font-weight: 600; background: rgba(0,0,0,0.25); border-radius: 8px; padding: 6px 8px; }
+  #meta { font-size: 0.85rem; opacity: 0.85; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Bluetooth Finder</h1>
+    <p class="sub">Walk around. The closer you get, the hotter it gets.</p>
+  </header>
+
+  <div id="noBluetooth" class="notice err" hidden>
+    <p><strong>Web Bluetooth isn't available here.</strong></p>
+    <p id="noBluetoothReason"></p>
+    <p>Open this page from an <strong>https://</strong> link in <strong>Chrome on Android</strong>. Opening the file directly (file://) or using Firefox, Samsung Internet or iPhone Safari won't work.</p>
+  </div>
+
+  <div id="noWatch" class="notice warn" hidden>
+    <p><strong>Live signal tracking is turned off in Chrome.</strong></p>
+    <ol>
+      <li>Type <code>chrome://flags</code> in the address bar.</li>
+      <li>Search for <strong>experimental web platform</strong>.</li>
+      <li>Set <strong>Experimental Web Platform features</strong> to <strong>Enabled</strong>.</li>
+      <li>Tap <strong>Relaunch</strong>, then reopen this page.</li>
+    </ol>
+    <p style="margin-top:8px">Backup trick: Chrome's device picker (the <em>Pick device</em> button) shows signal bars next to each device. Reopen it as you move for a rough hot/cold.</p>
+  </div>
+
+  <div id="error" class="notice err" hidden></div>
+
+  <section id="meter" class="idle" aria-live="polite">
+    <div id="deviceName">No device selected</div>
+    <div id="label">—</div>
+    <div id="rssi">--<small> dBm</small></div>
+    <div id="trend"></div>
+    <div id="bar"><div id="barFill"></div></div>
+    <canvas id="spark" aria-hidden="true"></canvas>
+    <div id="stale" hidden>No signal for a few seconds. Keep moving, or check the pad's app isn't connected.</div>
+    <div id="meta"></div>
+  </section>
+
+  <div class="actions">
+    <button id="pick" class="primary">Pick device</button>
+    <button id="stop" class="secondary" disabled>Stop</button>
+  </div>
+
+  <section class="card">
+    <h2>Before you start</h2>
+    <ol>
+      <li>Enable <strong>Experimental Web Platform features</strong> in <code>chrome://flags</code> and relaunch Chrome.</li>
+      <li>Turn on the phone's <strong>Bluetooth</strong> and <strong>Location</strong>.</li>
+      <li><strong>Close or disconnect the walking pad's app</strong> on every phone. Most pads stop broadcasting while connected.</li>
+      <li>Tap <strong>Pick device</strong> and choose the pad. Look for names like <em>WalkingPad</em>, <em>KS-…</em>, <em>FS-…</em> or <em>Treadmill</em>. Not sure? Watch which entry's signal bars change as you move.</li>
+    </ol>
+  </section>
+
+  <section class="card">
+    <h2>Search tips</h2>
+    <ul>
+      <li>Walk slowly and <strong>pause 2–3 seconds</strong> in each spot. The reading needs a moment to settle.</li>
+      <li>Your body blocks signal, so turn around slowly in place to find the strongest direction.</li>
+      <li>Walls and furniture weaken the signal. A sudden jump usually means you've entered the right room.</li>
+      <li>Check under beds and sofas, behind doors, and in closets. Walking pads slide easily into flat spaces.</li>
+      <li>Roughly: −90 dBm or weaker is far or behind walls, −70 is the same room, −50 or stronger is within a metre or two.</li>
+    </ul>
+  </section>
+</main>
+
+<script>
+(() => {
+  const FAR = -95, NEAR = -45;      // dBm range mapped to cold -> hot
+  const SMOOTH_N = 8;               // readings in the moving average
+  const HISTORY_MS = 60000;         // sparkline window
+  const STALE_MS = 5000;
+
+  const $ = (id) => document.getElementById(id);
+  const meter = $("meter"), pickBtn = $("pick"), stopBtn = $("stop");
+
+  let device = null, abort = null;
+  let raw = [];          // recent raw readings for smoothing
+  let history = [];      // {t, v} smoothed values
+  let lastPacket = 0, packets = 0, wasHot = false;
+
+  // ---- capability checks ----
+  function checkSupport() {
+    if (!window.isSecureContext) {
+      showNoBluetooth("This page isn't loaded over HTTPS, so Chrome blocks Bluetooth.");
+      return false;
+    }
+    if (!navigator.bluetooth) {
+      showNoBluetooth("This browser doesn't support Web Bluetooth.");
+      return false;
+    }
+    if (!(window.BluetoothDevice && "watchAdvertisements" in BluetoothDevice.prototype)) {
+      $("noWatch").hidden = false;
+    }
+    navigator.bluetooth.getAvailability?.().then((ok) => {
+      if (!ok) showError("Bluetooth looks switched off or unavailable on this device. Turn it on and reload.");
+    }).catch(() => {});
+    return true;
+  }
+  function showNoBluetooth(reason) {
+    $("noBluetoothReason").textContent = reason;
+    $("noBluetooth").hidden = false;
+    pickBtn.disabled = true;
+  }
+  function showError(msg) {
+    const el = $("error");
+    el.textContent = msg;
+    el.hidden = !msg;
+  }
+
+  // ---- device selection + tracking ----
+  async function pick() {
+    showError("");
+    try {
+      const d = await navigator.bluetooth.requestDevice({
+        acceptAllDevices: true,
+        optionalServices: [0x1826], // Fitness Machine Service (treadmills / walking pads)
+      });
+      await stop();
+      device = d;
+      $("deviceName").textContent = d.name || "Unnamed device (" + d.id.slice(0, 8) + "…)";
+      if (typeof d.watchAdvertisements !== "function") {
+        $("noWatch").hidden = false;
+        $("label").textContent = "Selected";
+        $("meta").textContent = "Live tracking needs the Chrome flag (see the yellow box above).";
+        return;
+      }
+      raw = []; history = []; packets = 0; wasHot = false;
+      lastPacket = Date.now();
+      d.addEventListener("advertisementreceived", onAdvert);
+      abort = new AbortController();
+      await d.watchAdvertisements({ signal: abort.signal });
+      meter.classList.remove("idle");
+      $("label").textContent = "Listening…";
+      $("meta").textContent = "Waiting for the first broadcast…";
+      stopBtn.disabled = false;
+    } catch (e) {
+      if (e && e.name === "NotFoundError") return; // user cancelled the picker
+      showError("Couldn't start: " + (e && e.message ? e.message : e));
+    }
+  }
+
+  async function stop() {
+    if (abort) { abort.abort(); abort = null; }
+    if (device) device.removeEventListener("advertisementreceived", onAdvert);
+    stopBtn.disabled = true;
+    meter.classList.add("idle");
+    $("stale").hidden = true;
+    $("trend").textContent = "";
+  }
+
+  function onAdvert(ev) {
+    if (typeof ev.rssi !== "number") return;
+    const now = Date.now();
+    lastPacket = now;
+    packets++;
+    raw.push(ev.rssi);
+    if (raw.length > SMOOTH_N) raw.shift();
+    const avg = raw.reduce((a, b) => a + b, 0) / raw.length;
+    history.push({ t: now, v: avg });
+    while (history.length && now - history[0].t > HISTORY_MS) history.shift();
+    render(avg, now);
+  }
+
+  // ---- rendering ----
+  function heatOf(v) {
+    return Math.min(1, Math.max(0, (v - FAR) / (NEAR - FAR)));
+  }
+  function labelOf(v) {
+    if (v >= -50) return "Right here!";
+    if (v >= -62) return "Hot";
+    if (v >= -74) return "Warm";
+    if (v >= -86) return "Cold";
+    return "Freezing";
+  }
+
+  function render(avg, now) {
+    const heat = heatOf(avg);
+    meter.style.setProperty("--heat", heat.toFixed(3));
+    $("rssi").innerHTML = Math.round(avg) + "<small> dBm</small>";
+    $("label").textContent = labelOf(avg);
+    $("barFill").style.width = (heat * 100).toFixed(0) + "%";
+    $("stale").hidden = true;
+    $("meta").textContent = packets + " readings · raw " + raw[raw.length - 1] + " dBm";
+
+    // Trend: compare the last ~1.5s against the ~1.5s that came 3s earlier
+    const recent = history.filter((h) => now - h.t <= 1500);
+    const older = history.filter((h) => now - h.t > 3000 && now - h.t <= 4500);
+    let trend = "";
+    if (recent.length && older.length) {
+      const diff = mean(recent) - mean(older);
+      if (diff > 2) trend = "↑ Getting warmer";
+      else if (diff < -2) trend = "↓ Getting colder";
+      else trend = "→ Steady";
+    }
+    $("trend").textContent = trend;
+
+    const hot = avg >= -62;
+    if (hot && !wasHot && navigator.vibrate) navigator.vibrate([120, 60, 120]);
+    wasHot = hot;
+
+    drawSpark(now);
+  }
+  function mean(arr) { return arr.reduce((a, h) => a + h.v, 0) / arr.length; }
+
+  function drawSpark(now) {
+    const c = $("spark");
+    const dpr = window.devicePixelRatio || 1;
+    const w = c.clientWidth, h = c.clientHeight;
+    if (c.width !== w * dpr || c.height !== h * dpr) { c.width = w * dpr; c.height = h * dpr; }
+    const ctx = c.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+    if (history.length < 2) return;
+    ctx.strokeStyle = "rgba(255,255,255,0.95)";
+    ctx.lineWidth = 2.5;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    history.forEach((p, i) => {
+      const x = w - ((now - p.t) / HISTORY_MS) * w;
+      const y = h - 4 - heatOf(p.v) * (h - 8);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    });
+    ctx.stroke();
+  }
+
+  setInterval(() => {
+    if (abort && Date.now() - lastPacket > STALE_MS) $("stale").hidden = false;
+  }, 1000);
+
+  pickBtn.addEventListener("click", pick);
+  stopBtn.addEventListener("click", stop);
+  checkSupport();
+})();
+</script>
+</body>
+</html>
